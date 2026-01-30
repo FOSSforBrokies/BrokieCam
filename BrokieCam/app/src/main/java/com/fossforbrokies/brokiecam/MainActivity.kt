@@ -1,30 +1,7 @@
 package com.fossforbrokies.brokiecam
 
-//import android.os.Bundle
-//import androidx.activity.ComponentActivity
-//import androidx.activity.compose.setContent
-//import androidx.activity.enableEdgeToEdge
-//import com.fossforbrokies.brokiecam.ui.theme.BrokieCamTheme
-
-//class MainActivity : ComponentActivity() {
-//    override fun onCreate(savedInstanceState: Bundle?) {
-//        super.onCreate(savedInstanceState)
-//        enableEdgeToEdge()
-//        setContent {
-//            BrokieCamTheme {
-////                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-////                    Greeting(
-////                        name = "Android",
-////                        modifier = Modifier.padding(innerPadding)
-////                    )
-////                }
-//            }
-//        }
-//    }
-//}
 
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels

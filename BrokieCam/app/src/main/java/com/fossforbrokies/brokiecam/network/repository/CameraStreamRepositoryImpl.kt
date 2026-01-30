@@ -18,23 +18,28 @@ import java.util.concurrent.atomic.AtomicLong
 private const val LOG_TAG = "CameraStreamRepo"
 
 /**
- * Implementation of the CameraStreamRepository that uses TCP sockets for data transmission
+ * Repository implementation that bridges camera frames to TCP socket transmission
+ *
+ * Architecture:
+ * - ViewModel produces frames → Repository queues frames → Streamer sends over TCP
+ * - Uses StateFlow to expose connection status reactively to UI
+ * - Manages its own coroutine scope (independent of ViewModel lifecycle)
  */
 class CameraStreamRepositoryImpl: CameraStreamRepository{
 
-    // Lifecycle-aware scope for the repository
-    // SupervisorJob is to ensure that if one child dies, the scope doesn't die
+    /**
+     * Repository-scoped coroutine scope
+     * - SupervisorJob: Child failures don't cancel siblings or parent
+     */
     private val repositoryScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // Internal mutable state
+    /** Internal mutable state - only modified by this repository */
     private val _connectionStatus = MutableStateFlow(StreamStatus.IDLE)
-    // External read-only state for ViewModel
+
+    /** External read-only state exposed to ViewModel/UI */
     override val connectionStatus: StateFlow<StreamStatus> = _connectionStatus
 
-    // Atomic counter for thread-safe logging rate-limiter
-    private val frameCounter = AtomicLong(0)
-
-    // Dedicated streamer instance
+    /** TCP streamer instance - handles low-level socket operations */
     private val streamer = TcpFrameStreamer { isConnected ->
         if (isConnected) {
             updateState(StreamStatus.CONNECTED)
@@ -43,10 +48,15 @@ class CameraStreamRepositoryImpl: CameraStreamRepository{
         }
     }
 
+    /**
+     * Initiates connection to the TCP server via ADB reverse tunneling.
+     *
+     * @param port Server port (1024-65535)
+     */
     override fun connect(port: Int) {
-        // Validate input
+        // Validate port range
         if (port !in 1024..65535){
-            Log.e(LOG_TAG, "Invalid port: $port. Must be between 1024-65535")
+            Log.e(LOG_TAG, "[!] Invalid port: $port. Must be between 1024-65535")
             updateState(StreamStatus.ERROR)
             return
         }
@@ -58,6 +68,9 @@ class CameraStreamRepositoryImpl: CameraStreamRepository{
         }
     }
 
+    /**
+     * Closes the active TCP connection.
+     */
     override fun disconnect() {
         repositoryScope.launch {
             streamer.disconnect()
@@ -66,28 +79,23 @@ class CameraStreamRepositoryImpl: CameraStreamRepository{
     }
 
     /**
-     * Stream a single frame to the server
+     * Transmits a single camera frame to the server.
      *
-     * @param frame CameraFrame object containing metadata and raw image data (JPEG)
+     * @param frame CameraFrame containing JPEG data and metadata
      */
     override suspend fun streamFrame(frame: CameraFrame) {
         if (_connectionStatus.value != StreamStatus.CONNECTED) return
 
         streamer.sendFrame(frame.data)
-
-        // Rate-limited logging
-        if (frameCounter.getAndIncrement() % 100 == 0L){
-            Log.v(LOG_TAG, "Sent Frame #${frameCounter.get()} (${frame.data.size} bytes)")
-        }
     }
 
     /**
-     * Cleanup method
-     * Call when the ViewModel is destroyed
+     * Cleanup hook - call when repository is no longer needed
+     * Called when the ViewModel is destroyed - ViewModel.onCleared()
      */
     fun onCleared(){
         disconnect()
-        repositoryScope.cancel()
+        repositoryScope.cancel() // Cancel all pending coroutines
     }
 
     /**
@@ -95,7 +103,7 @@ class CameraStreamRepositoryImpl: CameraStreamRepository{
      */
     private fun updateState(newState: StreamStatus) {
         if (_connectionStatus.value != newState) {
-            Log.i(LOG_TAG, "State Change: ${_connectionStatus.value} -> $newState")
+            Log.i(LOG_TAG, "[*] State Change: ${_connectionStatus.value} -> $newState")
             _connectionStatus.value = newState
         }
     }

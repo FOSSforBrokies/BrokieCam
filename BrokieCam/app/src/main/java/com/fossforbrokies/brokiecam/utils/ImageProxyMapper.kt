@@ -121,7 +121,7 @@ fun ImageProxy.toJpegByteArray(quality: Int = 50): ByteArray {
 
     } catch (e: Exception) {
 
-        Log.e(LOG_TAG, "Error converting ImageProxy to JPEG", e)
+        Log.e(LOG_TAG, "[!] Error converting ImageProxy to JPEG", e)
         return ByteArray(0)
     }
 }

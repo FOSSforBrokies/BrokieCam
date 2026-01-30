@@ -11,14 +11,22 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
+/**
+ * ViewModel for camera streaming screen
+ *
+ * Architecture Pattern: Producer-Consumer
+ * - Producer: CameraX analyzer (background thread) → onNewFrameCaptured()
+ * - Queue: frameChannel (capacity=2, drop oldest on overflow)
+ * - Consumer: Single coroutine reading from channel → repository.streamFrame()
+ */
 class CameraViewModel(
     private val repository: CameraStreamRepository
 ): ViewModel() {
 
+    /** Reactive connection status exposed to UI */
     val connectionStatus: StateFlow<StreamStatus> = repository.connectionStatus
 
-    // Keep at most 2 frames in memory
-    // If the network is busy, drop the oldest frame
+    /** Buffered channel for frame transmission */
     private val frameChannel = Channel<CameraFrame>(
         capacity = 2,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -53,8 +61,14 @@ class CameraViewModel(
     }
 
     /**
-     * Called by the CameraX Analyzer (Background Thread)
-     * Use trySend() to non-blocking push to the channel
+     * Called by CameraX analyzer whenever a new frame is ready
+     *
+     * Runs on background executor thread
+     * Uses trySend() to non-blocking push to the channel
+     *
+     * @param jpegBytes JPEG-encoded image data
+     * @param width Frame width in pixels
+     * @param height Frame height in pixels
      */
     fun onNewFrameCaptured(jpegBytes: ByteArray, width: Int, height: Int){
         if (connectionStatus.value != StreamStatus.CONNECTED) return
@@ -70,11 +84,11 @@ class CameraViewModel(
     }
 
     /**
-     * Cleanup: Ensure the connection is closed when the ViewModel is destroyed.
+     * Cleanup: Ensure the connection is closed when the ViewModel is destroyed
      */
     override fun onCleared() {
         super.onCleared()
         repository.disconnect()
-        frameChannel.close()
+        frameChannel.close() // Signals consumer coroutine to exit
     }
 }

@@ -25,6 +25,17 @@ import java.util.concurrent.Executors
 
 private const val LOG_TAG = "CameraPreview"
 
+/**
+ * Composable that displays live camera preview and captures frames for streaming
+ *
+ * Architecture:
+ * - Preview UseCase: Renders camera feed to UI
+ * - ImageAnalysis UseCase: Captures frames for processing
+ *
+ * @param modifier Compose modifier for layout
+ * @param scaleType How camera preview fits in the view (FILL_CENTER crops to fit)
+ * @param onFrameCaptured Callback with JPEG bytes and dimensions for each captured frame
+ */
 @Composable
 fun CameraPreview (
     modifier: Modifier = Modifier,
@@ -34,8 +45,10 @@ fun CameraPreview (
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Dedicated thread for image processing (YUV -> JPEG conversion)
+    /** Dedicated thread for image processing (YUV -> JPEG conversion */
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+
+    /** Android View for rendering camera preview */
     val previewView = remember { PreviewView(context).apply { this.scaleType = scaleType } }
 
     DisposableEffect(Unit) {
@@ -47,7 +60,7 @@ fun CameraPreview (
     LaunchedEffect(lifecycleOwner) {
         val cameraProvider = ProcessCameraProvider.getInstance(context).await()
 
-        // Preview Use Case
+        // --- PREVIEW USE CASE ---
         val preview = Preview.Builder().build().also {
             // surfaceProvider
             // - ready-made object inside PreviewView
@@ -55,10 +68,12 @@ fun CameraPreview (
             // - preview --> (frames) --> surfaceProvider --> PreviewView reads frames from surfaceProvider and renders them
             it.surfaceProvider = previewView.surfaceProvider
         }
-        // Analysis Use Case
+        // --- IMAGE ANALYSIS USE CASE ---
         val resolutionSelector = ResolutionSelector.Builder()
             .setResolutionStrategy(
-                ResolutionStrategy(Size(1280, 720), FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)
+                ResolutionStrategy(
+                    Size(1280, 720),
+                    FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)
             )
             .build()
 
@@ -69,6 +84,7 @@ fun CameraPreview (
 
         imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
             try {
+                // Convert YUV_420_888 → JPEG
                 val jpegBytes = imageProxy.toJpegByteArray(quality = 60)
 
                 if (jpegBytes.isNotEmpty()) {
@@ -76,12 +92,13 @@ fun CameraPreview (
                 }
 
             } catch (e: Exception) {
-                Log.e(LOG_TAG, "Frame analysis failed", e)
+                Log.e(LOG_TAG, "[!] Frame analysis failed", e)
             } finally {
                 imageProxy.close()
             }
         }
 
+        // ---- BIND TO LIFECYCLE ----
         try {
             cameraProvider.unbindAll()
             cameraProvider.bindToLifecycle(
@@ -91,7 +108,7 @@ fun CameraPreview (
                 imageAnalysis
             )
         } catch (e: Exception){
-            Log.e(LOG_TAG, "Camera binding failed", e)
+            Log.e(LOG_TAG, "[!] Camera binding failed", e)
         }
     }
 

@@ -17,10 +17,13 @@ private const val SEND_BUFFER_SIZE = 64 * 1024 // 64KB
 private const val MAGIC_NUMBER: Short = 0xFEED.toShort()
 
 /**
- * Streamer for sending camera frames over a TCP socket using a simple binary protocol
- * Use a buffered DataOutputStream for efficient writes
+ * Low-level TCP streamer for sending camera frames using a binary protocol
+ * Uses DataOutputStream for efficient binary writes and BufferedOutputStream to reduce syscalls
  *
- * @param onStatusUpdate Callback invoked with true/false when the connection state changes
+ * Protocol Format:
+ * [MAGIC_NUMBER (2 bytes BE)] + [LENGTH (4 bytes BE)] + [JPEG DATA (N bytes)]
+ *
+ * @param onStatusUpdate Callback invoked when connection state changes (true = connected, false = disconnected)
  */
 class TcpFrameStreamer (
     private val onStatusUpdate: (Boolean) -> Unit
@@ -28,40 +31,43 @@ class TcpFrameStreamer (
     private var socket: Socket? = null
     private var dataOutputStream: DataOutputStream? = null
 
+    /** Ensures thread-safe access to socket resources */
     private val connectionMutex = Mutex()
 
     /**
-     * Connect to the host via ABD reverse tunneling
+     * Establishes a TCP connection via ADB reverse tunneling
+     * Always connects to localhost (127.0.0.1) since ADB forwards the port
+     *
+     * @param port Server port (forwarded via 'adb reverse tcp:PORT tcp:PORT')
      */
     suspend fun connect(port: Int) {
         return withContext(Dispatchers.IO) {
             connectionMutex.withLock {
-                // Clean up ensuring no lingering sockets exist
+                // Clean up any lingering connections
                 closeSocketInternal()
 
-                Log.d(LOG_TAG, "Connecting to 127.0.0.1:${port}...")
+                Log.d(LOG_TAG, "[+] Connecting to 127.0.0.1:${port} via ADB reverse......")
 
                 try {
                     val newSocket = Socket()
 
-                    // Tcp optimizations for real-time video
-                    newSocket.tcpNoDelay = true
-                    newSocket.soTimeout = 0
-                    newSocket.sendBufferSize = SEND_BUFFER_SIZE
+                    // Tcp optimizations for real-time video streaming
+                    newSocket.tcpNoDelay = true // Disable Nagle's algorithm
+                    newSocket.soTimeout = 0 // No read timeout
+                    newSocket.sendBufferSize = SEND_BUFFER_SIZE // Optimize kernel buffer
 
                     newSocket.connect(InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS)
 
-
-                    // DataOutputStream for easy writing
-                    // Buffer the output to reduce system calls
                     socket = newSocket
                     dataOutputStream =
-                        DataOutputStream(BufferedOutputStream(newSocket.getOutputStream()))
+                        DataOutputStream(
+                            BufferedOutputStream(newSocket.getOutputStream()) // Buffer the output to reduce system calls
+                        )
 
-                    Log.i(LOG_TAG, "TCP connection established")
+                    Log.i(LOG_TAG, "[+] TCP connection established")
                     onStatusUpdate(true)
                 } catch (e: Exception) {
-                    Log.e(LOG_TAG, "Connection failed: ${e.message}")
+                    Log.e(LOG_TAG, "[!] Connection failed: ${e.message}")
                     onStatusUpdate(false)
                 }
             }
@@ -69,8 +75,10 @@ class TcpFrameStreamer (
     }
 
     /**
-     * Send a frame with a binary header
+     * Sends a JPEG frame with binary header protocol
      * Protocol: [MAGIC_NUMBER (2 bytes)] + [LENGTH (4 bytes)] + [PAYLOAD (N bytes)]
+     *
+     * @param frameData JPEG-encoded image bytes
      */
     suspend fun sendFrame(frameData: ByteArray){
         return withContext(Dispatchers.IO){
@@ -80,12 +88,13 @@ class TcpFrameStreamer (
                 val stream = dataOutputStream ?: return@withLock
 
                 try{
+                    // Write protocol header
                     stream.writeShort(MAGIC_NUMBER.toInt())
                     stream.writeInt(frameData.size)
                     stream.write(frameData)
                     stream.flush()
                 } catch (e: Exception){
-                    Log.e(LOG_TAG, "Write error, closing socket", e)
+                    Log.e(LOG_TAG, "[!] Write error, closing socket", e)
                     closeSocketInternal()
                     onStatusUpdate(false)
                 }
@@ -93,6 +102,9 @@ class TcpFrameStreamer (
         }
     }
 
+    /**
+     * Closes the TCP connection
+     */
     suspend fun disconnect(){
         return withContext(Dispatchers.IO){
             connectionMutex.withLock {
@@ -103,17 +115,17 @@ class TcpFrameStreamer (
     }
 
     /**
-     * Internal helper to close resources safely
+     * Internal helper to close streams and socket safely
      * Must be called inside a Mutex lock
      */
     private fun closeSocketInternal(){
         try{
             dataOutputStream?.close()
             socket?.close()
-            Log.d(LOG_TAG, "Connection closed")
+            Log.d(LOG_TAG, "[-] Connection closed")
 
         } catch (e: Exception){
-            Log.w(LOG_TAG, "Error during socket close", e)
+            Log.w(LOG_TAG, "[!] Error during socket close", e)
         } finally {
             dataOutputStream = null
             socket = null
