@@ -2,25 +2,11 @@
 
 > **Turn your Android phone into a webcam over USB** — Free, open-source, and I use Arch BTW:3.
 
-BrokieCam is a lightweight Android app that streams your phone's camera to your Linux computer via USB, creating a virtual webcam device. Perfect for video calls, streaming, or recording when you don't have a dedicated webcam.
+BrokieCam is a lightweight Android app that streams your phone's camera to your Linux computer via USB, creating a virtual webcam device. Perfect for video calls, streaming, or recording when you don't have a dedicated webcam. All processing happens locally, no cloud services.
 
 ![License](https://img.shields.io/badge/License-GPLv2-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Android%208.0%2B-green.svg)
 ![Server](https://img.shields.io/badge/server-Node.js%20%7C%20Linux-orange.svg)
-
----
-
-## Features
-
-- **Low Latency** — Real-time streaming optimized for video calls
-- **USB Connection** — No WiFi lag, no network setup required
-- **720p Streaming** — Smooth 30 FPS at 1280x720 resolution **(can be upgraded in configurations)**
-- **Virtual Webcam** — Works with Zoom, Teams, OBS, and any app that supports V4L2
-- **Battery Friendly** — USB connection also charges your phone
-- **Privacy First** — All processing happens locally, no cloud services
-- **100% Free** — No ads, no subscriptions, no bullshit
-
----
 
 ## Requirements
 
