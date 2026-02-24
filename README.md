@@ -8,7 +8,11 @@
 
 BrokieCam is a lightweight Android app that streams your phone's camera to your Linux computer via USB, creating a virtual webcam device. Perfect for video calls, streaming, or recording when you don't have a dedicated webcam. All processing happens locally, no cloud services.
 
----
+## Demo
+
+<p align="center">
+  <img src="assets/BrokieCamDemo.png" alt="BrokieCam Terminal Demo" width="600">
+</p>
 
 ## Requirements
 
