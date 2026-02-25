@@ -117,6 +117,54 @@ ffplay /dev/video20
 
 ---
 
+## Architecture
+
+### High-Level System Flow
+
+**Android App**: Captures frames, compresses them to JPEG, and sends them over a local TCP socket.
+
+**ADB Reverse Proxy**: Maps the phone's local port (5000) to the computer's local port over the USB cable.
+
+**Linux Server**: Listens on the desktop port, parses the custom binary protocol, and pipes the raw JPEG frames into FFmpeg, which converts them to a raw video format and writes to v4l2loopback.
+
+**v4l2loopback**: Exposes the stream as a standard /dev/video20 device usable by any Linux application.
+
+### Android App Architecture
+
+**UI Layer**
+
+- **Screen**: A Jetpack Compose UI that displays the live camera feed and connection controls.
+
+- **CameraX Composable**: Binds a `Preview` use case to render to the screen and an `ImageAnalysis` use case to extract and convert raw YUV frames to JPEG on a background thread.
+
+- **View Model**: Bridges the camera and network. It uses a `Channel<CameraFrame>` (capacity 2, drop oldest on overflow) so the camera thread never blocks waiting for a slow network. A single persistent coroutine consumes that channel and forwards to the repository.
+
+**Core Layer**
+
+Decouples the UI from network logic.
+
+- **Model**: Defines core data structures.
+
+- **Repository**: Interfaces for network actions.
+
+**Network Layer**
+
+- **Repository (Implementation)**: Manages a dedicated coroutine scope to process and push frames independently of the UI lifecycle. It delegates all socket work to TCP Streamer.
+
+- **TCP Streamer**: Establishes a thread-safe socket connection to the PC via ADB reverse tunneling and writes frames using a custom binary protocol
+
+- **Binary Protocol**: `[MAGIC_NUMBER (2 bytes BE)] + [LENGTH (4 bytes BE)] + [JPEG DATA (N bytes)]`
+
+### Server
+
+- **TCP Server**: Listens on port 5000 (with `TCP_NODELAY` for low latency)
+
+- **Protocol Decoder**: Buffers and parses the custom binary headers to cleanly extract individual JPEG frames
+
+- **FFmpeg Pipeline**: Spawns an `ffmpeg` process, piping the extracted JPEGs directly to the `v4l2loopback` virtual camera (`/dev/video20`)
+
+---
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
