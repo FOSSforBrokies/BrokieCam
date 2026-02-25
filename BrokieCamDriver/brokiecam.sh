@@ -11,7 +11,7 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}🎥 BrokieCam Launcher${NC}"
+echo -e "${GREEN}BrokieCam Launcher${NC}"
 echo "=============================="
 
 # 0. Check for Virtual Camera (Reboot Handler)
