@@ -92,7 +92,7 @@ The script automatically handles:
 **Expected output:**
 
 ```
-🎥 BrokieCam Launcher
+BrokieCam Launcher
 ==============================
 [*] Virtual camera (/dev/video20) not found.
     Creating it now (Password may be required)... [sudo] password for maxim: 
