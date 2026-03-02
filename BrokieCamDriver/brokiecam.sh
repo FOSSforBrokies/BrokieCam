@@ -1,20 +1,48 @@
 #!/bin/bash
 
-# --- CONFIGURATION ---
+# =====================================
+# CONFIGURATION
+# =====================================
+
 # Lock execution to the script's folder so paths always work
 cd "$(dirname "$0")"
 VIDEO_DEVICE="/dev/video20"
+PORT=5000
 
-# --- COLORS ---
+# =====================================
+# COLORS
+# =====================================
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# =====================================
+# CLEANUP HANDLER
+# =====================================
+
+# Triggers automatically when Ctrl+C is pressed
+cleanup() {
+    echo -e "\n${YELLOW}[-] Stopping BrokieCam Server...${NC}"
+    echo -n "[-] Tearing down ADB reverse tunnel... "
+    adb reverse --remove tcp:$PORT 2>/dev/null
+    echo -e "${GREEN}DONE${NC}"
+    echo -e "${CYAN}[-] Bye!${NC}"
+    exit 0
+}
+
+# Bind the cleanup function to SIGINT and SIGTERM
+trap cleanup SIGINT SIGTERM
 
 echo -e "${GREEN}BrokieCam Launcher${NC}"
 echo "=============================="
 
-# 0. Check for Virtual Camera (Reboot Handler)
+# =====================================
+# VIRTUAL CAMERA SETUP
+# =====================================
+
+# Check for Virtual Camera
 if [ ! -e "$VIDEO_DEVICE" ]; then
     echo -e "${YELLOW}[*] Virtual camera ($VIDEO_DEVICE) not found.${NC}"
     echo -n "    Creating it now (Password may be required)... "
@@ -32,10 +60,14 @@ if [ ! -e "$VIDEO_DEVICE" ]; then
         exit 1
     fi
 else
-    echo -e "[+] Virtual camera found ($VIDEO_DEVICE)"
+    echo -e "${CYAN}[+] Virtual camera found ($VIDEO_DEVICE)${NC}"
 fi
 
-# 1. Check if ADB sees a device
+# =====================================
+# 1. DEVICE DETECTION
+# =====================================
+
+# Check if ADB sees a device
 echo -n "[*] Looking for phone... "
 DEVICE_CHECK=$(adb devices | grep -w "device")
 
@@ -49,9 +81,11 @@ else
     echo -e "${GREEN}FOUND${NC}"
 fi
 
-# 2. Setup the ADB Bridge
+# =====================================
+# 2. ADB BRIDGE SETUP
+# =====================================
 echo -n "[+] Building TCP Bridge... "
-adb reverse tcp:5000 tcp:5000
+adb reverse tcp:$PORT tcp:$PORT
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}DONE${NC}"
@@ -61,12 +95,14 @@ else
     exit 1
 fi
 
-# 3. Start the Driver (Auto-detects TS vs JS)
-echo "[+] Starting Video Driver..."
-echo "   (Press Ctrl+C to stop)"
+# =====================================
+# 3. START VIDEO DRIVER
+# =====================================
+echo -e "${CYAN}[+] Starting Video Driver...${NC}"
+echo -e "${YELLOW}   (Press Ctrl+C to stop)${NC}"
 echo "=============================="
 
-# Check for TypeScript in src/ (Standard structure)
+# Check for TypeScript in src/
 if [ -f "src/index.ts" ]; then
     npx ts-node src/index.ts
 
@@ -74,16 +110,11 @@ if [ -f "src/index.ts" ]; then
 elif [ -f "index.ts" ]; then
     npx ts-node index.ts
 
-# Check for JavaScript (if you built it)
+# Check for JavaScript
 elif [ -f "index.js" ]; then
     node index.js
 
 else
-    echo -e "${RED}[!] Error: Could not find index.ts or src/index.ts!${NC}"
+    echo -e "${RED}[!] Error: Could not find index.ts, src/index.ts, or index.js!${NC}"
     exit 1
 fi
-
-# 4. Cleanup
-echo ""
-echo "[-] Stopping..."
-echo "[-] Bye!"
