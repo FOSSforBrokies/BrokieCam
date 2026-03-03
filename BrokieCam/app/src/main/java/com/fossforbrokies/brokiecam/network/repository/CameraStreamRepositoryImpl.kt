@@ -5,8 +5,10 @@ import com.fossforbrokies.brokiecam.core.model.CameraFrame
 import com.fossforbrokies.brokiecam.core.repository.CameraStreamRepository
 import com.fossforbrokies.brokiecam.core.repository.StreamStatus
 import com.fossforbrokies.brokiecam.network.socket.TcpFrameStreamer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,12 +28,14 @@ private const val LOG_TAG = "CameraStreamRepo"
  * - Manages its own coroutine scope (independent of ViewModel lifecycle)
  */
 class CameraStreamRepositoryImpl: CameraStreamRepository{
-
     /**
      * Repository-scoped coroutine scope
      * - SupervisorJob: Child failures don't cancel siblings or parent
      */
     private val repositoryScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** Internal state to observe infinite connection loop*/
+    private var connectionJob: Job? = null
 
     /** Internal mutable state - only modified by this repository */
     private val _connectionStatus = MutableStateFlow(StreamStatus.IDLE)
@@ -44,7 +48,9 @@ class CameraStreamRepositoryImpl: CameraStreamRepository{
         if (isConnected) {
             updateState(StreamStatus.CONNECTED)
         } else {
-            updateState(StreamStatus.DISCONNECTED)
+            if (_connectionStatus.value == StreamStatus.CONNECTED){
+                updateState(StreamStatus.CONNECTING)
+            }
         }
     }
 
@@ -56,15 +62,22 @@ class CameraStreamRepositoryImpl: CameraStreamRepository{
     override fun connect(port: Int) {
         // Validate port range
         if (port !in 1024..65535){
-            Log.e(LOG_TAG, "[!] Invalid port: $port. Must be between 1024-65535")
+            Log.e(LOG_TAG, "Invalid port: $port. Must be between 1024-65535")
             updateState(StreamStatus.ERROR)
             return
         }
 
         updateState(StreamStatus.CONNECTING)
+        // Cancel existing loops before starting a new one
+        connectionJob?.cancel()
 
-        repositoryScope.launch {
-            streamer.connect(port)
+        connectionJob = repositoryScope.launch {
+            try {
+                streamer.maintainConnectionLoop(port)
+            } catch (e: CancellationException) {
+                Log.d(LOG_TAG, "Streaming loop cancelled by repository")
+                throw e
+            }
         }
     }
 
@@ -72,8 +85,12 @@ class CameraStreamRepositoryImpl: CameraStreamRepository{
      * Closes the active TCP connection.
      */
     override fun disconnect() {
+        connectionJob?.cancel()
+        connectionJob = null
+
         repositoryScope.launch {
             streamer.disconnect()
+            updateState(StreamStatus.DISCONNECTED)
         }
 
     }
@@ -103,7 +120,7 @@ class CameraStreamRepositoryImpl: CameraStreamRepository{
      */
     private fun updateState(newState: StreamStatus) {
         if (_connectionStatus.value != newState) {
-            Log.i(LOG_TAG, "[*] State Change: ${_connectionStatus.value} -> $newState")
+            Log.d(LOG_TAG, "State Change: ${_connectionStatus.value} -> $newState")
             _connectionStatus.value = newState
         }
     }

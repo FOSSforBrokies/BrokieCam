@@ -53,7 +53,7 @@ class CameraViewModel(
      * @param port port for ADB cable connection
      */
     fun toggleConnection(port: Int) {
-        if (connectionStatus.value == StreamStatus.CONNECTED){
+        if (connectionStatus.value == StreamStatus.CONNECTED || connectionStatus.value == StreamStatus.CONNECTING){
             repository.disconnect()
         } else {
             repository.connect(port)

@@ -1,5 +1,9 @@
 import * as net from "net";
-import { spawn, ChildProcess } from "child_process";
+import { spawn, ChildProcess, exec } from "child_process";
+import { promisify } from "util";
+import { log } from "./logger.js";
+
+const execAsync = promisify(exec)
 
 // =====================================
 // CONFIGURATION
@@ -35,6 +39,7 @@ let activeFFmpeg: ChildProcess | null = null;
 // FFMPEG MANAGEMENT
 // =====================================
 
+
 /**
  * Terminate an FFmpeg process
  * @param instance - The FFmpeg child process to kill
@@ -47,7 +52,7 @@ function killFFmpeg(instance: ChildProcess | null): Promise<void>{
             return;
         }
 
-        console.log("[-] Killing FFmpeg...");
+        log("INFO", "FFMPEG", "Killing FFmpeg...");
 
         // Close stdin pipe to signal end-of-stream
         if (instance.stdin && !instance.stdin.destroyed){
@@ -57,7 +62,7 @@ function killFFmpeg(instance: ChildProcess | null): Promise<void>{
         // Wait for clean process termination
         const onExit = () => {
             instance.removeAllListeners('close');
-            console.log("[-] FFmpeg is dead");
+            log("INFO", "FFMPEG", "FFmpeg is dead")
             resolve()
         }
 
@@ -71,15 +76,52 @@ function killFFmpeg(instance: ChildProcess | null): Promise<void>{
 }
 
 // =====================================
+// ADB TUNNEL RECOVERY
+// =====================================
+let isRecoveringAdb = false;
+
+/**
+ * Polls ADB until the device returns, then rebuilds the reverse tunnel
+ */
+async function restoreAdbTunnel(){
+    if (isRecoveringAdb) return;
+
+    isRecoveringAdb = true
+
+    log("WARN", "ADB", "USB connection lost. Waiting for device to return...");
+
+    while (true){
+        try{
+            const { stdout } = await execAsync("adb devices");
+
+            if (stdout.includes("\tdevice")){
+                log("INFO", "ADB", "Device detected! Rebuilding ADB tunneling...");
+
+                await execAsync(`adb reverse tcp:${PORT} tcp:${PORT}`);
+                log("INFO", "ADB", `ADB reverse tunnel restored on port ${PORT}`);
+
+                break
+            }
+        } catch(err){
+            // TODO
+        }
+
+        await new Promise(r => setTimeout(r, 500));
+    }
+
+    isRecoveringAdb = false
+}
+
+// =====================================
 // TCP SERVER
 // =====================================
 const server = net.createServer(async (socket: net.Socket) => {
-    console.log(`[+] Phone connected: ${socket.remoteAddress}`);
+    log("INFO", "TCP", `Phone connected: ${socket.remoteAddress}`);
     socket.setNoDelay(true); // Disable Nagle's algorithm for real-time streaming
 
     // --- CLEANUP PREVIOUS SESSION ---
     if (activeFFmpeg){
-        console.log("[*] Cleaning previous session...");
+        log("INFO", "SERVER", "Cleaning previous session...");
         await killFFmpeg(activeFFmpeg);
         activeFFmpeg = null;
 
@@ -95,7 +137,7 @@ const server = net.createServer(async (socket: net.Socket) => {
     ffmpeg.on('close', (code) => {
         // (0 = clean, 255 = SIGKILL, null = ongoing)
         if (code !== 0 && code !== 255 && code !== null) {
-            console.log(`[!] FFmpeg exited with code ${code}`);
+            log("WARN", "FFMPEG", `FFmpeg exited with code ${code}`);
         }
     })
 
@@ -106,7 +148,7 @@ const server = net.createServer(async (socket: net.Socket) => {
     ffmpeg.stderr.on('data', (data) => {
         const msg = data.toString();
         if (msg.includes('Error') || msg.includes('Invalid')) {
-             console.error(`[FFMPEG Error] ${msg}`);
+            log("ERROR", "FFMPEG", msg);
         }
     });
 
@@ -129,7 +171,7 @@ const server = net.createServer(async (socket: net.Socket) => {
             // Check magic number
             const magic = buffer.readUInt16BE(0);
             if (magic !== MAGIC_NUMBER){
-                console.error(`[!] Protocol mismatch`);
+                log("ERROR", "TCP", "Protocol mismatch");
                 socket.destroy();
                 return;
             }
@@ -153,22 +195,26 @@ const server = net.createServer(async (socket: net.Socket) => {
 
     // --- CONNECTION CLOSED ---
     socket.on('end', async () => {
-        console.log(`[-] Phone disconnected`);
+        log("INFO", "TCP", "Phone disconnected");
         await killFFmpeg(ffmpeg)
 
         if (activeFFmpeg === ffmpeg){
             activeFFmpeg = null
         }
+
+        restoreAdbTunnel();
     })
 
     // --- CONNECTION ERROR ---
     socket.on('error', async (err: Error) => {
-        console.error(`[-] Socket error: ${err.message}`);
+        log("ERROR", "TCP", `Socket error: ${err.message}`);
         await killFFmpeg(ffmpeg);
 
         if (activeFFmpeg === ffmpeg){
             activeFFmpeg = null
         }
+
+        restoreAdbTunnel();
     });
 });
 
