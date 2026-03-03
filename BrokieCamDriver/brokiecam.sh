@@ -104,11 +104,11 @@ echo "=============================="
 
 # Check for TypeScript in src/
 if [ -f "src/index.ts" ]; then
-    npx ts-node src/index.ts
+    npx tsx src/index.ts
 
 # Check for TypeScript in root
 elif [ -f "index.ts" ]; then
-    npx ts-node index.ts
+    npx tsx index.ts
 
 # Check for JavaScript
 elif [ -f "index.js" ]; then

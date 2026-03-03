@@ -67,16 +67,9 @@ fun CameraScreen(viewModel: CameraViewModel){
                 modifier = Modifier.height(56.dp)
             ) {
                 Text(
-                    text = if (connectionStatus == StreamStatus.CONNECTED) "STOP USB STREAM" else "START USB STREAM"
-                )
-            }
-
-            if (connectionStatus == StreamStatus.IDLE || connectionStatus == StreamStatus.ERROR) {
-                Text(
-                    text = "Run 'adb reverse tcp:5000 tcp:5000' on laptop first",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White,
-                    modifier = Modifier.padding(top = 8.dp)
+                    text = if (connectionStatus == StreamStatus.CONNECTED || connectionStatus == StreamStatus.CONNECTING)
+                        "STOP USB STREAM"
+                    else "START USB STREAM"
                 )
             }
         }
