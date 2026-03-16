@@ -1,32 +1,30 @@
 package com.fossforbrokies.brokiecam.core.repository
 
-import com.fossforbrokies.brokiecam.core.model.CameraFrame
+import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * Interface showing how the app interacts with the remote server
+ * Interfaces defining how the app interacts with the remote server
  */
 interface CameraStreamRepository {
 
-    // An observable state that tells the UI if the app is Connected, Disconnected, or Error
+    /** An observable state that tells the UI if the app is Connected, Disconnected, or Error*/
     val connectionStatus: StateFlow<StreamStatus>
 
-    // Start the connection to the server
-    fun connect(port: Int)
+    /** Initiates the three core pipelines:
+     * * Network Connectivity, Camera Hardware Processing, Data Transmission
+     */
+    fun connect(lifecycleOwner: LifecycleOwner, port: Int)
 
-    // Close the connection
-    fun disconnect()
-
-    // Send actual frame data to the server
-    suspend fun streamFrame(frame: CameraFrame)
+    /** Suspends hardware operations and terminates the network socket. */
+    suspend fun disconnect()
 
 }
 
 /**
- * Represent the current state of the network bridge
+ * Represents the current state of the network bridge
  */
 enum class StreamStatus {
-    IDLE,
     CONNECTING,
     CONNECTED,
     DISCONNECTED,

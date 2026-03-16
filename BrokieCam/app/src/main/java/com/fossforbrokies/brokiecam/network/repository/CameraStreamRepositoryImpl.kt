@@ -1,9 +1,10 @@
 package com.fossforbrokies.brokiecam.network.repository
 
 import android.util.Log
-import com.fossforbrokies.brokiecam.core.model.CameraFrame
+import androidx.lifecycle.LifecycleOwner
 import com.fossforbrokies.brokiecam.core.repository.CameraStreamRepository
 import com.fossforbrokies.brokiecam.core.repository.StreamStatus
+import com.fossforbrokies.brokiecam.core.video.CameraManager
 import com.fossforbrokies.brokiecam.network.socket.TcpFrameStreamer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -11,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -20,46 +22,59 @@ import java.util.concurrent.atomic.AtomicLong
 private const val LOG_TAG = "CameraStreamRepo"
 
 /**
- * Repository implementation that bridges camera frames to TCP socket transmission
+ * Orchestrator repository that links the hardware camera pipeline to the TCP network socket.
  *
- * Architecture:
- * - ViewModel produces frames → Repository queues frames → Streamer sends over TCP
- * - Uses StateFlow to expose connection status reactively to UI
- * - Manages its own coroutine scope (independent of ViewModel lifecycle)
+ * Architecture Flow:
+ * - [CameraManager] produces a continuous flow of encoded H.264 frames.
+ * - This repository collects that flow and pipes it directly to the [TcpFrameStreamer].
+ * - Uses [StateFlow] to expose network connection status reactively to the ViewModel/UI.
+ *
+ * @property cameraManager Manages camera lifecycle and encoding.
+ * @param streamerFactory Factory injecting the network status callback into the TCP client.
  */
-class CameraStreamRepositoryImpl: CameraStreamRepository{
+class CameraStreamRepositoryImpl(
+    private val cameraManager: CameraManager,
+    streamerFactory: (onStatusUpdate: (Boolean) -> Unit) -> TcpFrameStreamer
+): CameraStreamRepository{
     /**
-     * Repository-scoped coroutine scope
-     * - SupervisorJob: Child failures don't cancel siblings or parent
+     * Dedicated scope for background operations.
+     * [SupervisorJob] prevents a failure in one child coroutine from automatically cancelling sibling coroutines
      */
     private val repositoryScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    /** Internal state to observe infinite connection loop*/
+    // Active jobs
     private var connectionJob: Job? = null
+    private var cameraJob: Job? = null
+    private var collectorJob: Job? = null
 
-    /** Internal mutable state - only modified by this repository */
-    private val _connectionStatus = MutableStateFlow(StreamStatus.IDLE)
+    /** Internal mutable state for network status */
+    private val _connectionStatus = MutableStateFlow(StreamStatus.DISCONNECTED)
 
-    /** External read-only state exposed to ViewModel/UI */
+    /** public read-only state for the UI layer to observe status changes */
     override val connectionStatus: StateFlow<StreamStatus> = _connectionStatus
 
-    /** TCP streamer instance - handles low-level socket operations */
-    private val streamer = TcpFrameStreamer { isConnected ->
-        if (isConnected) {
-            updateState(StreamStatus.CONNECTED)
-        } else {
-            if (_connectionStatus.value == StreamStatus.CONNECTED){
-                updateState(StreamStatus.CONNECTING)
-            }
-        }
+    /** Instantiated TCP client with mapped status callback. */
+    private val streamer: TcpFrameStreamer = streamerFactory { isConnected ->
+        val newState = if (isConnected) StreamStatus.CONNECTED else StreamStatus.CONNECTING
+        updateState(newState)
     }
 
     /**
-     * Initiates connection to the TCP server via ADB reverse tunneling.
+     * Initiates the three core pipelines:
+     * * Network Connectivity, Camera Hardware Processing, Data Transmission
      *
-     * @param port Server port (1024-65535)
+     * @param lifecycleOwner The lifecycle controlling the CameraX instance.
+     * @param port Server port (1024-65535).
      */
-    override fun connect(port: Int) {
+    override fun connect(lifecycleOwner: LifecycleOwner, port: Int) {
+        // Prevent multiple simultaneous connection attempts
+        if (_connectionStatus.value == StreamStatus.CONNECTED ||
+            _connectionStatus.value == StreamStatus.CONNECTING){
+            Log.d(LOG_TAG, "Already connected or connecting. Ignoring duplicate request.")
+            return
+        }
+
+
         // Validate port range
         if (port !in 1024..65535){
             Log.e(LOG_TAG, "Invalid port: $port. Must be between 1024-65535")
@@ -68,51 +83,81 @@ class CameraStreamRepositoryImpl: CameraStreamRepository{
         }
 
         updateState(StreamStatus.CONNECTING)
-        // Cancel existing loops before starting a new one
-        connectionJob?.cancel()
 
+        // Start auto-healing network loop
         connectionJob = repositoryScope.launch {
             try {
                 streamer.maintainConnectionLoop(port)
             } catch (e: CancellationException) {
-                Log.d(LOG_TAG, "Streaming loop cancelled by repository")
+                Log.d(LOG_TAG, "Network loop cancelled by repository")
                 throw e
+            } catch (e: Exception) {
+                Log.e(LOG_TAG, "Unexpected error in network loop", e)
+                updateState(StreamStatus.ERROR)
             }
         }
-    }
 
-    /**
-     * Closes the active TCP connection.
-     */
-    override fun disconnect() {
-        connectionJob?.cancel()
-        connectionJob = null
+        // Set up hardware
+        cameraJob = repositoryScope.launch {
+            try{
+                cameraManager.startStreaming(lifecycleOwner, this)
 
-        repositoryScope.launch {
-            streamer.disconnect()
-            updateState(StreamStatus.DISCONNECTED)
+            } catch (e: CancellationException) {
+                Log.d(LOG_TAG, "Camera pipeline cancelled by repository")
+                throw e
+            } catch (e: Exception) {
+                Log.e(LOG_TAG, "Failed to start camera pipeline", e)
+                updateState(StreamStatus.ERROR)
+            }
+        }
+
+        // Pipe the emitted frames directly into the active socket
+        collectorJob = repositoryScope.launch {
+            try{
+                cameraManager.videoFrameFlow.collect { frameData ->
+                    if (_connectionStatus.value == StreamStatus.CONNECTED){
+                        streamer.sendFrame(frameData)
+                    }
+                }
+            } catch (e: CancellationException) {
+                Log.d(LOG_TAG, "Video streaming pipe cancelled by repository")
+                throw e
+            } catch (e: Exception) {
+                Log.e(LOG_TAG, "Failed to start video streaming pipeline", e)
+                updateState(StreamStatus.ERROR)
+            }
         }
 
     }
 
     /**
-     * Transmits a single camera frame to the server.
-     *
-     * @param frame CameraFrame containing JPEG data and metadata
+     * Suspends hardware operations and terminates the network socket.
+     * Ensures all background coroutines complete their final suspension points safely.
      */
-    override suspend fun streamFrame(frame: CameraFrame) {
-        if (_connectionStatus.value != StreamStatus.CONNECTED) return
+    override suspend fun disconnect() {
+        connectionJob?.cancelAndJoin()
+        cameraJob?.cancelAndJoin()
+        collectorJob?.cancelAndJoin()
 
-        streamer.sendFrame(frame.data)
+        connectionJob = null
+        cameraJob = null
+        collectorJob = null
+
+        // Clean up hardware and sockets
+        streamer.disconnect()
+        cameraManager.stopStreaming()
+
+        updateState(StreamStatus.DISCONNECTED)
     }
 
     /**
-     * Cleanup hook - call when repository is no longer needed
-     * Called when the ViewModel is destroyed - ViewModel.onCleared()
+     * Hook to be called from ViewModel.onCleared() to prevent memory leaks.
+     * Destroys the entire repository scope.
      */
-    fun onCleared(){
+    suspend fun onCleared(){
         disconnect()
         repositoryScope.cancel() // Cancel all pending coroutines
+        Log.i(LOG_TAG, "Repository cleared and scope cancelled")
     }
 
     /**
