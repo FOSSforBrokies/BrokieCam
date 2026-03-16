@@ -17,8 +17,11 @@ import kotlinx.coroutines.asExecutor
 private const val LOG_TAG = "CameraManager"
 
 /**
- * Manages the CameraX lifecycle and pipes frames to the H264Encoder
- * Designed for headless operation (no UI/PreviewView)
+ * Manages the CameraX lifecycle and pipes frames to the H264Encoder.
+ * Designed for headless operation (no UI/PreviewView).
+ *
+ * @property context The application or activity context to initialize [ProcessCameraProvider].
+ * @property encoder The hardware video encoder that will consume the camera frames.
  */
 class CameraManager(
     private val context: Context,
@@ -26,11 +29,17 @@ class CameraManager(
 ){
     private var cameraProvider: ProcessCameraProvider? = null
 
+    /** Flow exposing the encoder's NAL units */
+    val videoFrameFlow = encoder.videoFrameFlow
+
     /**
-     * Binds the CameraX pipeline to the encoder's input surface
+     * Prepares the encoder, initializes the CameraX , binds the CameraX pipeline to the encoder's input surface.
      *
-     * @param lifecycleOwner The Activity or Fragment lifecycle controlling the camera
-     * @param scope CoroutineScope used to start the encoder and handle surface requests
+     * @param lifecycleOwner The Activity or Fragment lifecycle controlling the camera hardware.
+     * @param scope CoroutineScope used to manage background encoding tasks.
+     * @param width The target resolution width. Defaults to 1280.
+     * @param height The target resolution height. Defaults to 720.
+     * @throws IllegalStateException If the encoder fails to provide a valid input surface.
      */
     suspend fun startStreaming(
         lifecycleOwner: LifecycleOwner,
@@ -39,13 +48,14 @@ class CameraManager(
         height: Int = 720
     ){
         try{
-            // Start the encoder to prepare the input surface
+            // Start the encoder to generate the input surface
             encoder.start(scope)
             val surface = encoder.inputSurface ?: throw IllegalStateException("Encoder Surface not ready")
 
-            // Initialize CameraX
+            // Initialize CameraX provider
             cameraProvider = ProcessCameraProvider.getInstance(context).await()
 
+            // Define the resolution strategy
             val resolutionSelector = ResolutionSelector.Builder()
                 .setResolutionStrategy(
                     ResolutionStrategy(
@@ -61,7 +71,7 @@ class CameraManager(
                 .build()
 
             // Connect CameraX directly to  encoder's surface
-            // CameraX -> Surface -> encoder
+            // CameraX -> Surface -> H264Encoder
             preview.setSurfaceProvider(Dispatchers.IO.asExecutor()){ request ->
                 Log.d(LOG_TAG, "Providing Surface to CameraX: ${width}x${height}")
                 request.provideSurface(surface, Dispatchers.IO.asExecutor()){ result ->
@@ -86,9 +96,10 @@ class CameraManager(
     }
 
     /**
-     * Unbinds CameraX and stops the H.264 encoder
+     * Safely tears down the camera pipeline.
+     * Unbinds all CameraX use cases and signals the [H264Encoder] to release its resources
      */
-    fun stopStreaming() {
+    suspend fun stopStreaming() {
         try{
             cameraProvider?.unbindAll()
             encoder.stop()
