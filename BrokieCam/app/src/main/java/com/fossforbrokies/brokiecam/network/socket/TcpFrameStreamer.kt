@@ -19,27 +19,31 @@ private const val CONNECT_TIMEOUT_MS = 2000
 private const val INITIAL_RECONNECT_DELAY_MS = 500L
 private const val MAX_RECONNECT_DELAY_MS = 5000L
 private const val MAX_INITIAL_ATTEMPTS = 5 // Give up after ~10 seconds if server is dead
-private const val SEND_BUFFER_SIZE = 64 * 1024 // 64KB
-private const val MAGIC_NUMBER: Short = 0xFEED.toShort()
+private const val SEND_BUFFER_SIZE = 128 * 1024 // 128KB
 
 /**
- * Low-level TCP streamer for sending camera frames using a binary protocol with auto-healing capabilities
- * Uses DataOutputStream for efficient binary writes and BufferedOutputStream to reduce syscalls
+ * TCP streamer for sending raw binary data over a persistent network connection.
+ * Includes an auto-healing connection loop with exponential backoff.
  *
- * Protocol Format:
- * [MAGIC_NUMBER (2 bytes BE)] + [LENGTH (4 bytes BE)] + [JPEG DATA (N bytes)]
+ * Current Implementation:
+ * Streams raw H.264 NAL units (Annex-B format) directly to the socket.
+ * Designed to work with ADB reverse tunneling
  *
- * @param onStatusUpdate Callback invoked when connection state changes (true = connected, false = disconnected)
+ * @param onStatusUpdate Callback invoked when connection state changes (true = connected, false = connecting)
  */
 class TcpFrameStreamer (
     private val onStatusUpdate: (Boolean) -> Unit
 ){
     private var socket: Socket? = null
-    private var dataOutputStream: DataOutputStream? = null
+    private var bufferedOutputStream: BufferedOutputStream? = null
     private val connectionMutex = Mutex()
 
     /**
-     * Infinite suspending loop that maintains the connection
+     * Infinite suspending loop that maintains the connection.
+     *
+     * Implements an exponential backoff strategy for reconnection.
+     *
+     * @param port The target port on localhost to connect to.
      */
     suspend fun maintainConnectionLoop(port: Int){
         var currentDelay = INITIAL_RECONNECT_DELAY_MS
@@ -65,6 +69,7 @@ class TcpFrameStreamer (
                         }
                     }
 
+                    // Exponential backoff for subsequent reconnect attempts
                     currentDelay = min(currentDelay * 2, MAX_RECONNECT_DELAY_MS)
                     Log.d(LOG_TAG, "Reconnect failed. Retrying in ${currentDelay}ms...")
                 }
@@ -77,10 +82,13 @@ class TcpFrameStreamer (
     }
 
     /**
-     * Establishes a TCP connection via ADB reverse tunneling
-     * Always connects to localhost (127.0.0.1) since ADB forwards the port
+     * Establishes a TCP connection to the specified port on localhost.
+     *
+     * Designed to work with ADB reverse tunneling.
      *
      * @param port Server port (forwarded via 'adb reverse tcp:PORT tcp:PORT')
+     * @return "true" if the connection was established successfully, "false" otherwise.
+     *
      */
     suspend fun connect(port: Int): Boolean {
         return withContext(Dispatchers.IO) {
@@ -93,7 +101,7 @@ class TcpFrameStreamer (
                 try {
                     val newSocket = Socket()
 
-                    // Tcp optimizations for real-time video streaming
+                    // Configurations for real-time video streaming
                     newSocket.tcpNoDelay = true // Disable Nagle's algorithm
                     newSocket.soTimeout = 0 // No read timeout
                     newSocket.sendBufferSize = SEND_BUFFER_SIZE // Optimize kernel buffer
@@ -102,10 +110,8 @@ class TcpFrameStreamer (
                     newSocket.connect(InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS)
 
                     socket = newSocket
-                    dataOutputStream =
-                        DataOutputStream(
-                            BufferedOutputStream(newSocket.getOutputStream()) // Buffer the output to reduce system calls
-                        )
+                    // Wrap in BufferedOutputStream to reduce the overhead of constant small native network writes
+                    bufferedOutputStream = BufferedOutputStream(newSocket.getOutputStream(), SEND_BUFFER_SIZE)
 
                     Log.i(LOG_TAG, "TCP connection established")
                     onStatusUpdate(true)
@@ -115,6 +121,7 @@ class TcpFrameStreamer (
                     Log.e(LOG_TAG, "Connection failed: ${e.message}")
                     onStatusUpdate(false)
                     closeSocketInternal()
+
                     return@withContext false;
                 }
             }
@@ -122,10 +129,9 @@ class TcpFrameStreamer (
     }
 
     /**
-     * Sends a JPEG frame with binary header protocol
-     * Protocol: [MAGIC_NUMBER (2 bytes)] + [LENGTH (4 bytes)] + [PAYLOAD (N bytes)]
+     * Sends raw NAL units over the active socket.
      *
-     * @param frameData JPEG-encoded image bytes
+     * @param frameData The binary payload to transmit.
      */
     suspend fun sendFrame(frameData: ByteArray){
 
@@ -133,12 +139,9 @@ class TcpFrameStreamer (
             if (socket == null || socket?.isClosed == true) return@withContext
 
             connectionMutex.withLock {
-                val stream = dataOutputStream ?: return@withLock
+                val stream = bufferedOutputStream ?: return@withLock
 
                 try{
-                    // Write protocol header
-                    stream.writeShort(MAGIC_NUMBER.toInt())
-                    stream.writeInt(frameData.size)
                     stream.write(frameData)
                     stream.flush()
                 } catch (e: Exception){
@@ -151,7 +154,7 @@ class TcpFrameStreamer (
     }
 
     /**
-     * Closes the TCP connection
+     * Closes the TCP connection and cleans up the resources.
      */
     suspend fun disconnect(){
         return withContext(Dispatchers.IO){
@@ -164,18 +167,18 @@ class TcpFrameStreamer (
 
     /**
      * Internal helper to close streams and socket safely
-     * Must be called inside a Mutex lock
+     * WARNING: Must be called inside a Mutex lock to prevent race conditions.
      */
     private fun closeSocketInternal(){
         try{
-            dataOutputStream?.close()
+            bufferedOutputStream?.close()
             socket?.close()
             Log.i(LOG_TAG, "Connection closed")
 
         } catch (e: Exception){
             Log.e(LOG_TAG, "Error during socket close", e)
         } finally {
-            dataOutputStream = null
+            bufferedOutputStream = null
             socket = null
         }
     }
