@@ -3,8 +3,10 @@ package com.fossforbrokies.brokiecam.core.video
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Build
 import android.util.Log
 import android.view.Surface
+import androidx.annotation.RequiresApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,12 +49,6 @@ class H264Encoder(
     private var isEncoding = false
     private var encoderJob: Job? = null
 
-    /**
-     * Caches the Sequence Parameter Set (SPS) and Picture Parameter Set (PPS)
-     * Used to inject them before every keyframe
-     */
-    private var configData: ByteArray? = null
-
     /** Backpressure-aware internal shared flow */
     private val _videoFrameFlow = MutableSharedFlow<ByteArray>(
         extraBufferCapacity = 60,
@@ -68,6 +64,7 @@ class H264Encoder(
      *
      * @param scope The coroutine scope used to launch the buffer-draining loop.
      */
+    @RequiresApi(Build.VERSION_CODES.Q)
     fun start(scope: CoroutineScope){
         if (isEncoding) return
 
@@ -79,6 +76,8 @@ class H264Encoder(
                 setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
                 setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // Keyframe every 1 second
+                setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1) // Prepend SPS/PPS
+
             }
 
             // Set up encoder
@@ -125,21 +124,7 @@ class H264Encoder(
                         val chunk = ByteArray(bufferInfo.size)
                         outputBuffer.get(chunk)
 
-                        // If the buffer contains SPS/PPS headers, cache them
-                        if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0){
-                            Log.d(LOG_TAG, "Cached SPS/PPS Config Data (${chunk.size} bytes)")
-                            configData = chunk
-                        } else{
-                            // If it's a keyframe, inject the SPS/PPS config data right before it
-                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 && configData != null){
-                                val keyframeWithConfig = configData!! + chunk
-                                _videoFrameFlow.tryEmit(keyframeWithConfig)
-
-                            // If it's a normal frame
-                            } else{
-                                _videoFrameFlow.tryEmit(chunk)
-                            }
-                        }
+                        _videoFrameFlow.tryEmit(chunk)
                     }
 
                     // Release the buffer back to the hardware pool

@@ -5,6 +5,7 @@ import androidx.lifecycle.LifecycleOwner
 import com.fossforbrokies.brokiecam.core.repository.CameraStreamRepository
 import com.fossforbrokies.brokiecam.core.repository.StreamStatus
 import com.fossforbrokies.brokiecam.core.video.CameraManager
+import com.fossforbrokies.brokiecam.network.socket.StreamState
 import com.fossforbrokies.brokiecam.network.socket.TcpFrameStreamer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -34,7 +35,7 @@ private const val LOG_TAG = "CameraStreamRepo"
  */
 class CameraStreamRepositoryImpl(
     private val cameraManager: CameraManager,
-    streamerFactory: (onStatusUpdate: (Boolean) -> Unit) -> TcpFrameStreamer
+    streamerFactory: (onStatusUpdate: (StreamState) -> Unit) -> TcpFrameStreamer
 ): CameraStreamRepository{
     /**
      * Dedicated scope for background operations.
@@ -54,8 +55,12 @@ class CameraStreamRepositoryImpl(
     override val connectionStatus: StateFlow<StreamStatus> = _connectionStatus
 
     /** Instantiated TCP client with mapped status callback. */
-    private val streamer: TcpFrameStreamer = streamerFactory { isConnected ->
-        val newState = if (isConnected) StreamStatus.CONNECTED else StreamStatus.CONNECTING
+    private val streamer: TcpFrameStreamer = streamerFactory { state ->
+        val newState = when (state) {
+            StreamState.CONNECTED -> StreamStatus.CONNECTED
+            StreamState.CONNECTING -> StreamStatus.CONNECTING
+            StreamState.DISCONNECTED -> StreamStatus.DISCONNECTED
+        }
         updateState(newState)
     }
 
@@ -154,10 +159,10 @@ class CameraStreamRepositoryImpl(
      * Hook to be called from ViewModel.onCleared() to prevent memory leaks.
      * Destroys the entire repository scope.
      */
-    suspend fun onCleared(){
+    override suspend fun release(){
         disconnect()
         repositoryScope.cancel() // Cancel all pending coroutines
-        Log.i(LOG_TAG, "Repository cleared and scope cancelled")
+        Log.i(LOG_TAG, "Repository resources released")
     }
 
     /**

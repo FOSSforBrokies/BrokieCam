@@ -21,6 +21,12 @@ private const val MAX_RECONNECT_DELAY_MS = 5000L
 private const val MAX_INITIAL_ATTEMPTS = 5 // Give up after ~10 seconds if server is dead
 private const val SEND_BUFFER_SIZE = 128 * 1024 // 128KB
 
+enum class StreamState {
+    CONNECTED,
+    CONNECTING,
+    DISCONNECTED
+}
+
 /**
  * TCP streamer for sending raw binary data over a persistent network connection.
  * Includes an auto-healing connection loop with exponential backoff.
@@ -32,11 +38,14 @@ private const val SEND_BUFFER_SIZE = 128 * 1024 // 128KB
  * @param onStatusUpdate Callback invoked when connection state changes (true = connected, false = connecting)
  */
 class TcpFrameStreamer (
-    private val onStatusUpdate: (Boolean) -> Unit
+    private val onStatusUpdate: (StreamState) -> Unit
 ){
     private var socket: Socket? = null
     private var bufferedOutputStream: BufferedOutputStream? = null
     private val connectionMutex = Mutex()
+
+    @Volatile
+    private var isStreaming = false
 
     /**
      * Infinite suspending loop that maintains the connection.
@@ -46,27 +55,28 @@ class TcpFrameStreamer (
      * @param port The target port on localhost to connect to.
      */
     suspend fun maintainConnectionLoop(port: Int){
+        isStreaming = true
         var currentDelay = INITIAL_RECONNECT_DELAY_MS
-        var hasConnectedOnce = false
-        var initialAttempts = 0
+        var consecutiveFailures = 0
 
-        while (currentCoroutineContext().isActive){
+        while (currentCoroutineContext().isActive && isStreaming){
             val isConnected = socket != null && socket?.isConnected == true && socket?.isClosed == false
 
             if (!isConnected){
+                onStatusUpdate(StreamState.CONNECTING)
                 val success = connect(port)
 
                 if (success){
-                    hasConnectedOnce = true
+                    consecutiveFailures = 0
                     currentDelay = INITIAL_RECONNECT_DELAY_MS
                 } else{
-                    if (!hasConnectedOnce){
-                        initialAttempts++
-                        if (initialAttempts >= MAX_INITIAL_ATTEMPTS){
-                            Log.w(LOG_TAG, "Server not found after $MAX_INITIAL_ATTEMPTS attempts. Giving up.")
-                            onStatusUpdate(false)
-                            break
-                        }
+                    consecutiveFailures++
+
+                    // If we fail [MAX_INITIAL_ATTEMPTS] times in a row, give up
+                    if (consecutiveFailures >= MAX_INITIAL_ATTEMPTS){
+                        Log.w(LOG_TAG, "Server not found after $MAX_INITIAL_ATTEMPTS attempts. Giving up.")
+                        isStreaming = false
+                        break
                     }
 
                     // Exponential backoff for subsequent reconnect attempts
@@ -75,10 +85,13 @@ class TcpFrameStreamer (
                 }
             } else{
                 currentDelay = INITIAL_RECONNECT_DELAY_MS
+                consecutiveFailures = 0
             }
 
             delay(currentDelay)
         }
+
+        onStatusUpdate(StreamState.DISCONNECTED)
     }
 
     /**
@@ -91,6 +104,8 @@ class TcpFrameStreamer (
      *
      */
     suspend fun connect(port: Int): Boolean {
+        if (!isStreaming) return false
+
         return withContext(Dispatchers.IO) {
             connectionMutex.withLock {
                 // Clean up any lingering connections
@@ -114,12 +129,11 @@ class TcpFrameStreamer (
                     bufferedOutputStream = BufferedOutputStream(newSocket.getOutputStream(), SEND_BUFFER_SIZE)
 
                     Log.i(LOG_TAG, "TCP connection established")
-                    onStatusUpdate(true)
+                    onStatusUpdate(StreamState.CONNECTED)
 
                     return@withContext true;
                 } catch (e: Exception) {
                     Log.e(LOG_TAG, "Connection failed: ${e.message}")
-                    onStatusUpdate(false)
                     closeSocketInternal()
 
                     return@withContext false;
@@ -134,6 +148,7 @@ class TcpFrameStreamer (
      * @param frameData The binary payload to transmit.
      */
     suspend fun sendFrame(frameData: ByteArray){
+        if (!isStreaming) return
 
         return withContext(Dispatchers.IO){
             if (socket == null || socket?.isClosed == true) return@withContext
@@ -147,7 +162,6 @@ class TcpFrameStreamer (
                 } catch (e: Exception){
                     Log.e(LOG_TAG, "Write error, closing socket", e)
                     closeSocketInternal()
-                    onStatusUpdate(false)
                 }
             }
         }
@@ -157,10 +171,13 @@ class TcpFrameStreamer (
      * Closes the TCP connection and cleans up the resources.
      */
     suspend fun disconnect(){
+        Log.i(LOG_TAG, "Disconnect requested. Shutting down streamer.")
+        isStreaming = false
+
         return withContext(Dispatchers.IO){
             connectionMutex.withLock {
                 closeSocketInternal()
-                onStatusUpdate(false)
+                onStatusUpdate(StreamState.DISCONNECTED)
             }
         }
     }

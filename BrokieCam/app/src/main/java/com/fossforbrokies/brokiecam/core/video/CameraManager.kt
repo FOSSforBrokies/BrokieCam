@@ -13,6 +13,7 @@ import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
+import kotlinx.coroutines.withContext
 
 private const val LOG_TAG = "CameraManager"
 
@@ -70,22 +71,24 @@ class CameraManager(
                 .setResolutionSelector(resolutionSelector)
                 .build()
 
-            // Connect CameraX directly to  encoder's surface
-            // CameraX -> Surface -> H264Encoder
-            preview.setSurfaceProvider(Dispatchers.IO.asExecutor()){ request ->
-                Log.d(LOG_TAG, "Providing Surface to CameraX: ${width}x${height}")
-                request.provideSurface(surface, Dispatchers.IO.asExecutor()){ result ->
-                    Log.d(LOG_TAG, "Surface delivery result: ${result.resultCode}")
+            withContext(Dispatchers.Main) {
+                // Connect CameraX directly to encoder's surface
+                // CameraX -> Surface -> H264Encoder
+                preview.setSurfaceProvider(Dispatchers.IO.asExecutor()){ request ->
+                    Log.d(LOG_TAG, "Providing Surface to CameraX: ${width}x${height}")
+                    request.provideSurface(surface, Dispatchers.IO.asExecutor()){ result ->
+                        Log.d(LOG_TAG, "Surface delivery result: ${result.resultCode}")
+                    }
                 }
-            }
 
-            // Bind to a lifecycle
-            cameraProvider?.unbindAll()
-            cameraProvider?.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_FRONT_CAMERA,
-                preview
-            )
+                // Bind to a lifecycle
+                cameraProvider?.unbindAll()
+                cameraProvider?.bindToLifecycle(
+                    lifecycleOwner,
+                    CameraSelector.DEFAULT_FRONT_CAMERA, // Currently using Front Camera!
+                    preview
+                )
+            }
 
             Log.i(LOG_TAG, "CameraX-to-H264 pipeline successfully bound")
 
@@ -101,7 +104,9 @@ class CameraManager(
      */
     suspend fun stopStreaming() {
         try{
-            cameraProvider?.unbindAll()
+            withContext(Dispatchers.Main) {
+                cameraProvider?.unbindAll()
+            }
             encoder.stop()
             Log.i(LOG_TAG, "CameraManager stopped streaming")
         } catch (e: Exception) {
