@@ -18,6 +18,7 @@ class MainActivity : ComponentActivity() {
         // App instance to access DI container
         val app = application as BrokieCamApplication
 
+        // Inject the ViewModel
         val viewModel: CameraViewModel by viewModels { app.container.viewModelFactory }
 
         setContent {

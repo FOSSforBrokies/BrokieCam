@@ -19,6 +19,11 @@ interface CameraStreamRepository {
     /** Suspends hardware operations and terminates the network socket. */
     suspend fun disconnect()
 
+    /** Releases all hardware resources and cancels background scopes.
+     * Should be called when the repository is no longer needed.
+     */
+    suspend fun release()
+
 }
 
 /**
