@@ -42,25 +42,20 @@ echo "=============================="
 # VIRTUAL CAMERA SETUP
 # =====================================
 
-# Check for Virtual Camera
-if [ ! -e "$VIDEO_DEVICE" ]; then
-    echo -e "${YELLOW}[*] Virtual camera ($VIDEO_DEVICE) not found.${NC}"
-    echo -n "    Creating it now (Password may be required)... "
-    
-    # Try to unload first just in case it's in a bad state
-    sudo modprobe -r v4l2loopback 2>/dev/null
-    
-    # Load it with correct settings
-    if sudo modprobe v4l2loopback video_nr=20 card_label="BrokieCam" exclusive_caps=1; then
-        echo -e "${GREEN}DONE${NC}"
-    else
-        echo -e "${RED}FAILED${NC}"
-        echo "[!] Could not load v4l2loopback."
-        echo "    Make sure you installed it: sudo pacman -S v4l2loopback-dkms"
-        exit 1
-    fi
+echo -e "${YELLOW}[*] Resetting Virtual Camera ($VIDEO_DEVICE)...${NC}"
+
+# Unload the camera to clear out broken states or old buffers
+sudo modprobe -r v4l2loopback 2>/dev/null
+
+# Rebuild it with strict exclusive_caps and low latency buffers
+echo -n "    Loading v4l2loopback module... "
+if sudo modprobe v4l2loopback video_nr=20 card_label="BrokieCam" exclusive_caps=1 max_buffers=2; then
+    echo -e "${GREEN}DONE${NC}"
 else
-    echo -e "${CYAN}[+] Virtual camera found ($VIDEO_DEVICE)${NC}"
+    echo -e "${RED}FAILED${NC}"
+    echo "[!] Could not load v4l2loopback."
+    echo "    Make sure you installed it: sudo pacman -S v4l2loopback-dkms"
+    exit 1
 fi
 
 # =====================================
