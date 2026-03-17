@@ -10,23 +10,21 @@ const execAsync = promisify(exec)
 // =====================================
 
 const PORT: number = 5000;
-const MAGIC_NUMBER: number = 0xFEED;
 const VIDEO_DEVICE: string = "/dev/video20";
 
 const FFMPEG_ARGS = [
     // --- INPUT ---
-    '-f', 'image2pipe',      // Input format: stream of images via pipe
-    '-vcodec', 'mjpeg',      // Input codec: Motion JPEG
+    '-f', 'h264',            // Input format: Raw H.264 video stream
     '-probesize', '32768',   // Limit probing to 32 KB for faster startup
     '-analyzeduration', '0', // Skip analysis, start immediately
     '-fflags', 'nobuffer',   // Discard buffered frames to reduce latency
     '-flags', 'low_delay',   // Optimize for low-latency streaming
+    '-use_wallclock_as_timestamps', '1', // Use the server's clock for timestamps (raw H.264 lacks PTS/DTS)
     '-i', '-',               // Read input from stdin
 
     // --- OUTPUT ---
-    '-map', '0',             // Map all streams from input
-    '-vcodec', 'rawvideo',   // Output codec: uncompressed raw video
-    '-pix_fmt', 'yuv420p',   // Pixel format
+    '-vcodec', 'rawvideo',   // Output codec: uncompressed raw video for v4l2
+    '-pix_fmt', 'yuv420p',   // Standard pixel format for virtual cameras
     '-threads', '0',         // Auto-detect optimal thread count
     '-f', 'v4l2',            // Output format: Video4Linux2
     VIDEO_DEVICE             // Target virtual camera: /dev/video20
@@ -38,7 +36,6 @@ let activeFFmpeg: ChildProcess | null = null;
 // =====================================
 // FFMPEG MANAGEMENT
 // =====================================
-
 
 /**
  * Terminate an FFmpeg process
@@ -152,45 +149,21 @@ const server = net.createServer(async (socket: net.Socket) => {
         }
     });
 
-    /** 
-     * Accumulates incoming TCP data chunks
-     * Protocol: [2 bytes magic][4 bytes length][N bytes JPEG data]
-     */
-    let buffer = Buffer.alloc(0);
+    // --- UNMUTED FFMPEG LOGS (USE FOR DEBUGGING) ---
+    // ffmpeg.stderr.on('data', (data) => {
+    //     const msg = data.toString().trim();
+    //     if (msg) {
+    //         console.log(`[FFMPEG DEBUG] ${msg}`);
+    //     }
+    // });
 
     // --- INCOMING DATA HANDLER ---
     socket.on('data', (chunk: Buffer) => {
         if (ffmpeg.killed || ffmpeg.exitCode !== null) return;
 
-        buffer = Buffer.concat([buffer, chunk]);
-
-        while (true) {
-            // If there's no [MAGIC_NUMBER (2 bytes)] + [LENGTH (4 bytes)]
-            if (buffer.length < 6) break;
-            
-            // Check magic number
-            const magic = buffer.readUInt16BE(0);
-            if (magic !== MAGIC_NUMBER){
-                log("ERROR", "TCP", "Protocol mismatch");
-                socket.destroy();
-                return;
-            }
-            
-            // Check image size
-            const length = buffer.readUInt32BE(2);
-            if (buffer.length < 6 + length) break;
-
-            // Extract jpeg
-            const jpegData = buffer.subarray(6, 6 + length)
-
-            // Send to FFmpeg
-            if (ffmpeg.stdin && !ffmpeg.stdin.destroyed) {
-                ffmpeg.stdin.write(jpegData);
-            }
-
-            // Remove frame from buffer
-            buffer = buffer.subarray(6 + length);
-        }
+        if (ffmpeg.stdin && !ffmpeg.stdin.destroyed) {
+            ffmpeg.stdin.write(chunk);
+        }   
     })
 
     // --- CONNECTION CLOSED ---
