@@ -10,10 +10,10 @@ android {
 
     defaultConfig {
         applicationId = "com.fossforbrokies.brokiecam"
-        minSdk = 29
+        minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "2.0.0"
+        versionCode = 3
+        versionName = "2.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -57,6 +57,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.material3)
 
     // Camera X
     implementation(libs.androidx.camera.core)
@@ -64,6 +65,7 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.compose.runtime)
     implementation(libs.androidx.camera.camera2)
+
 
     // Testing
 //    testImplementation(libs.junit)

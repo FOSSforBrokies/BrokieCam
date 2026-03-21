@@ -1,7 +1,9 @@
 package com.fossforbrokies.brokiecam.network.repository
 
+import android.annotation.SuppressLint
 import android.util.Log
 import androidx.lifecycle.LifecycleOwner
+import com.fossforbrokies.brokiecam.core.audio.MicManager
 import com.fossforbrokies.brokiecam.core.repository.CameraStreamRepository
 import com.fossforbrokies.brokiecam.core.repository.StreamStatus
 import com.fossforbrokies.brokiecam.core.video.CameraManager
@@ -17,7 +19,6 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicLong
 
 // Logging Tag
 private const val LOG_TAG = "CameraStreamRepo"
@@ -27,14 +28,19 @@ private const val LOG_TAG = "CameraStreamRepo"
  *
  * Architecture Flow:
  * - [CameraManager] produces a continuous flow of encoded H.264 frames.
- * - This repository collects that flow and pipes it directly to the [TcpFrameStreamer].
+ * - [MicManager] produces raw PCM audio chunks.
+ * - This repository collects both flows concurrently and pipes them directly to the [TcpFrameStreamer].
+ * - Ensures every collected frame is returned to its pool
  * - Uses [StateFlow] to expose network connection status reactively to the ViewModel/UI.
+ * - Can run video + audio, video-only, audio-only
  *
- * @property cameraManager Manages camera lifecycle and encoding.
+ * @property cameraManager Manages camera lifecycle and H.264 hardware encoding.
+ * @property micManager Manages microphone lifecycle and PCM audio capture.
  * @param streamerFactory Factory injecting the network status callback into the TCP client.
  */
 class CameraStreamRepositoryImpl(
     private val cameraManager: CameraManager,
+    private val micManager: MicManager,
     streamerFactory: (onStatusUpdate: (StreamState) -> Unit) -> TcpFrameStreamer
 ): CameraStreamRepository{
     /**
@@ -46,7 +52,9 @@ class CameraStreamRepositoryImpl(
     // Active jobs
     private var connectionJob: Job? = null
     private var cameraJob: Job? = null
-    private var collectorJob: Job? = null
+    private var micJob: Job? = null
+    private var videoCollectorJob: Job? = null
+    private var audioCollectorJob: Job? = null
 
     /** Internal mutable state for network status */
     private val _connectionStatus = MutableStateFlow(StreamStatus.DISCONNECTED)
@@ -66,12 +74,19 @@ class CameraStreamRepositoryImpl(
 
     /**
      * Initiates the three core pipelines:
-     * * Network Connectivity, Camera Hardware Processing, Data Transmission
+     * * Network Connectivity, Video Capture, Audio Capture
      *
      * @param lifecycleOwner The lifecycle controlling the CameraX instance.
      * @param port Server port (1024-65535).
+     * @param enableVideo Set to true to stream H.264 camera frames.
+     * @param enableAudio Set to true to stream PCM microphone data.
      */
-    override fun connect(lifecycleOwner: LifecycleOwner, port: Int) {
+    override fun connect(
+        lifecycleOwner: LifecycleOwner,
+        port: Int,
+        enableVideo: Boolean,
+        enableAudio: Boolean
+    ) {
         // Prevent multiple simultaneous connection attempts
         if (_connectionStatus.value == StreamStatus.CONNECTED ||
             _connectionStatus.value == StreamStatus.CONNECTING){
@@ -79,6 +94,10 @@ class CameraStreamRepositoryImpl(
             return
         }
 
+        if (!enableVideo && !enableAudio) {
+            Log.e(LOG_TAG, "Cannot connect: Both video and audio are disabled.")
+            return
+        }
 
         // Validate port range
         if (port !in 1024..65535){
@@ -89,7 +108,16 @@ class CameraStreamRepositoryImpl(
 
         updateState(StreamStatus.CONNECTING)
 
-        // Start auto-healing network loop
+        startNetworkPipeline(port)
+
+        if (enableVideo) startVideoPipeline(lifecycleOwner)
+        if (enableAudio) startAudioPipeline()
+    }
+
+    /**
+     * Launches the auto-healing connection loop, running independently of the hardware pipelines.
+     */
+    private fun startNetworkPipeline(port: Int){
         connectionJob = repositoryScope.launch {
             try {
                 streamer.maintainConnectionLoop(port)
@@ -101,8 +129,13 @@ class CameraStreamRepositoryImpl(
                 updateState(StreamStatus.ERROR)
             }
         }
+    }
 
-        // Set up hardware
+    /**
+     * Initializes the CameraX hardware pipeline and launches a dedicated collector
+     * coroutine to pipe compressed H.264 NAL units into the socket.
+     */
+    private fun startVideoPipeline(lifecycleOwner: LifecycleOwner){
         cameraJob = repositoryScope.launch {
             try{
                 cameraManager.startStreaming(lifecycleOwner, this)
@@ -116,12 +149,16 @@ class CameraStreamRepositoryImpl(
             }
         }
 
-        // Pipe the emitted frames directly into the active socket
-        collectorJob = repositoryScope.launch {
+        // Pipe the emitted video frames directly into the active socket
+        videoCollectorJob = repositoryScope.launch {
             try{
                 cameraManager.videoFrameFlow.collect { frameData ->
-                    if (_connectionStatus.value == StreamStatus.CONNECTED){
-                        streamer.sendFrame(frameData)
+                    try{
+                        if (_connectionStatus.value == StreamStatus.CONNECTED){
+                            streamer.sendVideoFrame(frameData)
+                        }
+                    } finally {
+                        frameData.release()
                     }
                 }
             } catch (e: CancellationException) {
@@ -132,7 +169,46 @@ class CameraStreamRepositoryImpl(
                 updateState(StreamStatus.ERROR)
             }
         }
+    }
 
+    /**
+     * Initializes the microphone hardware and launches a dedicated collector
+     * coroutine to pipe raw PCM audio chunks into the socket.
+     */
+    @SuppressLint("MissingPermission")
+    private fun startAudioPipeline(){
+        micJob = repositoryScope.launch {
+            try{
+                micManager.start(this)
+
+            } catch (e: CancellationException){
+                Log.d(LOG_TAG, "Mic pipeline cancelled by repository")
+                throw e
+            } catch (e: Exception) {
+                Log.e(LOG_TAG, "Failed to start mic pipeline", e)
+            }
+        }
+
+        // Pipe the emitted video frames directly into the active socket
+        audioCollectorJob = repositoryScope.launch {
+            try{
+                micManager.audioFrameFlow.collect { frameData ->
+                    try{
+                        if (_connectionStatus.value == StreamStatus.CONNECTED){
+                            streamer.sendAudioFrame(frameData)
+                        }
+                    } finally {
+                        frameData.release()
+                    }
+                }
+            } catch (e: CancellationException) {
+                Log.d(LOG_TAG, "Audio streaming pipe cancelled by repository")
+                throw e
+            } catch (e: Exception) {
+                Log.e(LOG_TAG, "Failed to start audio streaming pipeline", e)
+                updateState(StreamStatus.ERROR)
+            }
+        }
     }
 
     /**
@@ -140,17 +216,27 @@ class CameraStreamRepositoryImpl(
      * Ensures all background coroutines complete their final suspension points safely.
      */
     override suspend fun disconnect() {
+        // Stop network loop
         connectionJob?.cancelAndJoin()
+
+        // Stop collectors
+        videoCollectorJob?.cancelAndJoin()
+        audioCollectorJob?.cancelAndJoin()
+
+        // Stop hardware
         cameraJob?.cancelAndJoin()
-        collectorJob?.cancelAndJoin()
+        micJob?.cancelAndJoin()
 
         connectionJob = null
+        videoCollectorJob = null
+        audioCollectorJob = null
         cameraJob = null
-        collectorJob = null
+        micJob = null
 
         // Clean up hardware and sockets
         streamer.disconnect()
         cameraManager.stopStreaming()
+        micManager.stop()
 
         updateState(StreamStatus.DISCONNECTED)
     }

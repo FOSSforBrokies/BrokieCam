@@ -25,8 +25,8 @@ fun PermissionRequester(
 
     // Define permissions
     val requiredPermissions = arrayOf(
-        Manifest.permission.CAMERA
-        // Manifest.permission.RECORD_AUDIO
+        Manifest.permission.CAMERA,
+        Manifest.permission.RECORD_AUDIO
     )
 
     // Launcher to request permissions
