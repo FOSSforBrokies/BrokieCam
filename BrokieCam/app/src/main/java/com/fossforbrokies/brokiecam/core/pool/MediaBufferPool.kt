@@ -24,9 +24,6 @@ class MediaBufferPool(poolSize: Int, bufferSize: Int) {
         /** The presentation timestamp (PTS) of the media frame in milliseconds. */
         var presentationTimeMs: Long = 0
 
-        /** Indicates whether this buffer contains a video keyframe (IDR/sync frame). */
-        var isKeyFrame: Boolean = false
-
         /**
          * Clears the metadata to prevent cross-contamination for the next consumer
          */
@@ -34,7 +31,6 @@ class MediaBufferPool(poolSize: Int, bufferSize: Int) {
             // Clean up metadata for the next user
             length = 0
             presentationTimeMs = 0
-            isKeyFrame = false
 
             // Return to the lock-free queue
             freeQueue.offer(this)

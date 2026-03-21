@@ -1,6 +1,7 @@
 package com.fossforbrokies.brokiecam.core.audio
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -14,8 +15,6 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -47,14 +46,14 @@ class MicManager (
     private val readBufferSize = 2048
 
     /** Audio Pool */
-    private val audioPool = MediaBufferPool(poolSize = 51, bufferSize = readBufferSize)
+    private val audioPool = MediaBufferPool(poolSize = 6, bufferSize = readBufferSize)
 
     /** A sinkhole array used to safely drain the OS microphone buffer when internal pool is empty */
     private val trashBuffer = ByteArray(readBufferSize)
 
     /** Backpressure-aware internal channel */
     private val _audioChannel = Channel<MediaBufferPool.PooledBuffer>(
-        capacity = 50,
+        capacity = 5,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
         onUndeliveredElement = { droppedFrame ->
             Log.w(LOG_TAG, "Network lagging: Dropped OLDEST audio frame to maintain real-time.")
@@ -131,7 +130,10 @@ class MicManager (
                     pooledBuffer.length = bytesRead
                     pooledBuffer.presentationTimeMs = System.nanoTime() / 1000
 
-                    _audioChannel.trySend(pooledBuffer)
+                    val success = _audioChannel.trySend(pooledBuffer)
+                    if (!success.isSuccess){
+                        pooledBuffer.release()
+                    }
                 } else {
                     pooledBuffer.release()
 
