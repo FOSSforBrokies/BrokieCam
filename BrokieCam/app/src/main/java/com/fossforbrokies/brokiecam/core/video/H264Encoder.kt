@@ -3,18 +3,17 @@ package com.fossforbrokies.brokiecam.core.video
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.os.Build
 import android.util.Log
 import android.view.Surface
-import androidx.annotation.RequiresApi
+import com.fossforbrokies.brokiecam.core.pool.MediaBufferPool
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -49,14 +48,24 @@ class H264Encoder(
     private var isEncoding = false
     private var encoderJob: Job? = null
 
-    /** Backpressure-aware internal shared flow */
-    private val _videoFrameFlow = MutableSharedFlow<ByteArray>(
-        extraBufferCapacity = 60,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    /** SPS/PPS Cache */
+    private var configCache: ByteArray? = null
+
+    /** Video Pool */
+    private val videoPool = MediaBufferPool(poolSize = 3, bufferSize = 1024 * 1024)
+
+    /** Backpressure-aware internal channel */
+    private val _videoChannel = Channel<MediaBufferPool.PooledBuffer>(
+        capacity = 2,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        onUndeliveredElement = { droppedFrame ->
+            Log.d(LOG_TAG, "Network lagging: Dropped OLDEST video frame to maintain real-time.")
+            droppedFrame.release()
+        }
     )
 
     /** Public read-only stream of encoded H.264 NAL units. */
-    val videoFrameFlow = _videoFrameFlow.asSharedFlow()
+    val videoFrameFlow = _videoChannel.receiveAsFlow()
 
     /**
      * Configures and starts the hardware encoder, generating [inputSurface].
@@ -64,7 +73,6 @@ class H264Encoder(
      *
      * @param scope The coroutine scope used to launch the buffer-draining loop.
      */
-    @RequiresApi(Build.VERSION_CODES.Q)
     fun start(scope: CoroutineScope){
         if (isEncoding) return
 
@@ -76,8 +84,6 @@ class H264Encoder(
                 setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
                 setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // Keyframe every 1 second
-                setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1) // Prepend SPS/PPS
-
             }
 
             // Set up encoder
@@ -88,6 +94,7 @@ class H264Encoder(
             }
 
             isEncoding = true
+            configCache = null
 
             // Spin up a dedicated loop to pull encoded frames from output buffers
             encoderJob = scope.launch(Dispatchers.IO){
@@ -100,7 +107,7 @@ class H264Encoder(
     }
 
     /**
-     * Continuously reads NAL units from [MediaCodec] and emits them to the flow
+     * Continuously reads NAL units from [MediaCodec] and send them to [_videoChannel]
      */
     private suspend fun drainOutputLoop(){
         // Metadata for each encoded frame (size, offset, timestamp, flags)
@@ -120,13 +127,44 @@ class H264Encoder(
                         outputBuffer.position(bufferInfo.offset)
                         outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
 
-                        // Save to
-                        val chunk = ByteArray(bufferInfo.size)
-                        outputBuffer.get(chunk)
+                        // Catch config frame(SPS/PPS)
+                        if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0){
+                            configCache = ByteArray(bufferInfo.size)
+                            outputBuffer.get(configCache!!)
 
-                        _videoFrameFlow.tryEmit(chunk)
+                            currentCodec.releaseOutputBuffer(outputBufferId, false)
+                            continue
+                        }
+
+                        val pooledBuffer = videoPool.acquire()
+
+                        if (pooledBuffer == null) {
+                            Log.d(LOG_TAG, "Network lag detected: Pool empty, dropping new Video Frame")
+                        } else {
+                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 && configCache != null){
+                                // Prepend config to keyframe
+                                val totalSize = configCache!!.size + bufferInfo.size
+                                pooledBuffer.length = totalSize
+
+                                // Copy config bytes
+                                System.arraycopy(configCache!!, 0, pooledBuffer.data, 0, configCache!!.size)
+                                // Copy frame bytes
+                                outputBuffer.get(pooledBuffer.data, configCache!!.size, bufferInfo.size)
+
+                            } else{
+                                // Normal frame
+                                pooledBuffer.length = bufferInfo.size
+                                outputBuffer.get(pooledBuffer.data, 0, bufferInfo.size)
+                            }
+
+                            pooledBuffer.presentationTimeMs = bufferInfo.presentationTimeUs / 1000
+
+                            val success = _videoChannel.trySend(pooledBuffer)
+                            if (!success.isSuccess){
+                                pooledBuffer.release()
+                            }
+                        }
                     }
-
                     // Release the buffer back to the hardware pool
                     currentCodec.releaseOutputBuffer(outputBufferId, false)
                 }
@@ -157,6 +195,7 @@ class H264Encoder(
         } finally {
             codec = null
             inputSurface = null
+            configCache = null
             Log.i(LOG_TAG, "H.264 hardware encoder stopped")
         }
     }

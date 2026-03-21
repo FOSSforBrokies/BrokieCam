@@ -3,6 +3,7 @@ package com.fossforbrokies.brokiecam
 import android.app.Application
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import com.fossforbrokies.brokiecam.core.audio.MicManager
 import com.fossforbrokies.brokiecam.core.video.CameraManager
 import com.fossforbrokies.brokiecam.core.video.H264Encoder
 import com.fossforbrokies.brokiecam.network.repository.CameraStreamRepositoryImpl
@@ -30,7 +31,7 @@ class BrokieCamApplication: Application() {
  */
 class AppContainer(private val application: Application){
 
-    // Hardware encoder
+    /** Hardware encoder */
     private val h264Encoder by lazy {
         H264Encoder(
             width = 1280,
@@ -40,7 +41,7 @@ class AppContainer(private val application: Application){
         )
     }
 
-    // CameraX lifecycle manager.
+    /** CameraX lifecycle manager */
     private val cameraManager by lazy {
         CameraManager(
             context = application,
@@ -48,10 +49,16 @@ class AppContainer(private val application: Application){
         )
     }
 
+    /** Mic lifecycle manager */
+    private val micManager by lazy {
+        MicManager()
+    }
+
     // Repository
     val repository by lazy {
         CameraStreamRepositoryImpl(
             cameraManager = cameraManager,
+            micManager = micManager,
             streamerFactory = { onStatusUpdateCallback ->
                 TcpFrameStreamer(onStatusUpdate = onStatusUpdateCallback)
             }

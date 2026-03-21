@@ -1,6 +1,7 @@
 package com.fossforbrokies.brokiecam.network.socket
 
 import android.util.Log
+import com.fossforbrokies.brokiecam.core.pool.MediaBufferPool
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -14,12 +15,21 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import kotlin.math.min
 
+// --- LOG CONSTANTS ---
 private const val LOG_TAG = "TcpFrameStreamer"
+
+// --- NETWORK RECOVERY CONSTANTS ---
 private const val CONNECT_TIMEOUT_MS = 2000
 private const val INITIAL_RECONNECT_DELAY_MS = 500L
 private const val MAX_RECONNECT_DELAY_MS = 5000L
 private const val MAX_INITIAL_ATTEMPTS = 5 // Give up after ~10 seconds if server is dead
-private const val SEND_BUFFER_SIZE = 128 * 1024 // 128KB
+private const val SEND_BUFFER_SIZE = 32 * 1024 // 128KB
+
+// --- PROTOCOL CONSTANTS ---
+private const val MAGIC_BYTE_1: Byte = 0x42 // 'B' (Brokie)
+private const val MAGIC_BYTE_2: Byte = 0x43 // 'C' (Cam)
+private const val TYPE_VIDEO: Byte = 0x01
+private const val TYPE_AUDIO: Byte = 0x02
 
 enum class StreamState {
     CONNECTED,
@@ -28,12 +38,18 @@ enum class StreamState {
 }
 
 /**
- * TCP streamer for sending raw binary data over a persistent network connection.
+ * TCP streamer for multiplexing raw video and audio over a persistent network connection.
  * Includes an auto-healing connection loop with exponential backoff.
  *
- * Current Implementation:
- * Streams raw H.264 NAL units (Annex-B format) directly to the socket.
- * Designed to work with ADB reverse tunneling
+ * Custom Protocol:
+ * - [2 Bytes] Magic Identifier (`0x42`, `0x43`)
+ * - [1 Byte]  Payload Type (`0x01` = Video, `0x02` = Audio)
+ * - [4 Bytes] Payload Length (32-bit Integer)
+ * - [N Bytes] The raw payload data (H.264 NAL unit or PCM Audio chunk)
+ *
+ * (Note: If A/V sync timestamps are re-enabled, the header size will increase by 8 bytes)
+ *
+ * Designed to work locally with ADB reverse tunneling
  *
  * @param onStatusUpdate Callback invoked when connection state changes (true = connected, false = connecting)
  */
@@ -41,14 +57,19 @@ class TcpFrameStreamer (
     private val onStatusUpdate: (StreamState) -> Unit
 ){
     private var socket: Socket? = null
-    private var bufferedOutputStream: BufferedOutputStream? = null
+    private var dataOutputStream: DataOutputStream? = null
+
+    /** Mutex for state management */
     private val connectionMutex = Mutex()
+
+    /** Mutex for thread-safe writing */
+    private val writeMutex = Mutex()
 
     @Volatile
     private var isStreaming = false
 
     /**
-     * Infinite suspending loop that maintains the connection.
+     * Infinite suspending loop that maintains the socket connection.
      *
      * Implements an exponential backoff strategy for reconnection.
      *
@@ -67,6 +88,7 @@ class TcpFrameStreamer (
                 val success = connect(port)
 
                 if (success){
+                    // Reset
                     consecutiveFailures = 0
                     currentDelay = INITIAL_RECONNECT_DELAY_MS
                 } else{
@@ -84,6 +106,7 @@ class TcpFrameStreamer (
                     Log.d(LOG_TAG, "Reconnect failed. Retrying in ${currentDelay}ms...")
                 }
             } else{
+                // Reset
                 currentDelay = INITIAL_RECONNECT_DELAY_MS
                 consecutiveFailures = 0
             }
@@ -95,7 +118,7 @@ class TcpFrameStreamer (
     }
 
     /**
-     * Establishes a TCP connection to the specified port on localhost.
+     * Attempts a TCP connection to the specified port on localhost.
      *
      * Designed to work with ADB reverse tunneling.
      *
@@ -123,10 +146,13 @@ class TcpFrameStreamer (
                     newSocket.keepAlive = true
 
                     newSocket.connect(InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS)
-
                     socket = newSocket
-                    // Wrap in BufferedOutputStream to reduce the overhead of constant small native network writes
-                    bufferedOutputStream = BufferedOutputStream(newSocket.getOutputStream(), SEND_BUFFER_SIZE)
+
+                    // BufferedOutputStream to reduce the overhead of constant small native network writes
+                    // DataOutputStream to easily writeInt() and writeLong() for the protocol header.
+                    dataOutputStream = DataOutputStream(
+                        BufferedOutputStream(newSocket.getOutputStream(), SEND_BUFFER_SIZE)
+                    )
 
                     Log.i(LOG_TAG, "TCP connection established")
                     onStatusUpdate(StreamState.CONNECTED)
@@ -142,26 +168,52 @@ class TcpFrameStreamer (
         }
     }
 
+    /** Routes a video frame through a multiplexer */
+    suspend fun sendVideoFrame(frame: MediaBufferPool.PooledBuffer){
+        sendFrame(TYPE_VIDEO, frame)
+    }
+
+    /** Routes an audio frame through a multiplexer */
+    suspend fun sendAudioFrame(frame: MediaBufferPool.PooledBuffer){
+        sendFrame(TYPE_AUDIO, frame)
+    }
+
     /**
-     * Sends raw NAL units over the active socket.
+     * Synchronously writes a frame to the socket using our custom binary protocol.
      *
-     * @param frameData The binary payload to transmit.
+     * @param type Stream identifier ([TYPE_VIDEO] or [TYPE_AUDIO]).
+     * @param frame Pooled buffer containing the payload and metadata.
      */
-    suspend fun sendFrame(frameData: ByteArray){
+    private suspend fun sendFrame(type: Byte, frame: MediaBufferPool.PooledBuffer){
         if (!isStreaming) return
 
         return withContext(Dispatchers.IO){
             if (socket == null || socket?.isClosed == true) return@withContext
 
-            connectionMutex.withLock {
-                val stream = bufferedOutputStream ?: return@withLock
+            writeMutex.withLock {
+                val stream = dataOutputStream ?: return@withLock
 
                 try{
-                    stream.write(frameData)
+                    // Magic Bytes (2 Bytes)
+                    stream.writeByte(MAGIC_BYTE_1.toInt())
+                    stream.writeByte(MAGIC_BYTE_2.toInt())
+
+                    // Metadata header (5/13 bytes)
+                    stream.writeByte(type.toInt())
+                    // TODO: Uncomment when A/V sync is implemented
+                    // stream.writeLong(frame.presentationTimeMs)
+                    stream.writeInt(frame.length)
+
+                    // Payload (N bytes)
+                    stream.write(frame.data, 0, frame.length)
+
                     stream.flush()
+
                 } catch (e: Exception){
                     Log.e(LOG_TAG, "Write error, closing socket", e)
-                    closeSocketInternal()
+                    connectionMutex.withLock {
+                        closeSocketInternal()
+                    }
                 }
             }
         }
@@ -188,14 +240,14 @@ class TcpFrameStreamer (
      */
     private fun closeSocketInternal(){
         try{
-            bufferedOutputStream?.close()
+            dataOutputStream?.close()
             socket?.close()
             Log.i(LOG_TAG, "Connection closed")
 
         } catch (e: Exception){
             Log.e(LOG_TAG, "Error during socket close", e)
         } finally {
-            bufferedOutputStream = null
+            dataOutputStream = null
             socket = null
         }
     }
