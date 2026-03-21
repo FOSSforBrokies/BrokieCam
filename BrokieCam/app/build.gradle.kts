@@ -57,6 +57,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.material3)
 
     // Camera X
     implementation(libs.androidx.camera.core)
@@ -64,6 +65,7 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.compose.runtime)
     implementation(libs.androidx.camera.camera2)
+
 
     // Testing
 //    testImplementation(libs.junit)

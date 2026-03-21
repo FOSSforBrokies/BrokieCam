@@ -13,15 +13,22 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -30,6 +37,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.fossforbrokies.brokiecam.core.repository.StreamStatus
@@ -42,6 +51,29 @@ fun CameraScreen(viewModel: CameraViewModel){
     val connectionStatus by viewModel.connectionStatus.collectAsState()
 
     val lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                viewModel.stopStream()
+            }
+        }
+
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // Local UI state for the modular hardware pipelines
+    var enableVideo by remember { mutableStateOf(false) }
+    var enableAudio by remember { mutableStateOf(false) }
+
+    val isStreaming = connectionStatus == StreamStatus.CONNECTED || connectionStatus == StreamStatus.CONNECTING
+
+    // Prevent starting if both are disabled
+    val canStart = enableVideo || enableAudio
 
     // Smoothly animate the background color changes
     val animatedTopColor by animateColorAsState(
@@ -57,8 +89,10 @@ fun CameraScreen(viewModel: CameraViewModel){
 
     // Animate button color
     val animatedButtonColor by animateColorAsState(
-        targetValue = if (connectionStatus == StreamStatus.CONNECTED || connectionStatus == StreamStatus.CONNECTING) {
+        targetValue = if (isStreaming) {
             Color(0xFFE53935) // Vibrant Red
+        } else if (!canStart) {
+            Color(0xFF424242) // Disabled Gray
         } else {
             Color(0xFF1E88E5) // Vibrant Blue
         },
@@ -66,7 +100,6 @@ fun CameraScreen(viewModel: CameraViewModel){
         label = "btn_color_anim"
     )
 
-    // Status color
     val statusColor = getStatusColor(connectionStatus)
 
     Box(
@@ -93,23 +126,23 @@ fun CameraScreen(viewModel: CameraViewModel){
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "HARDWARE ENCODER LIVE",
+                text = "MADE FOR BROKE PEOPLE",
                 style = MaterialTheme.typography.labelMedium,
                 color = Color.White.copy(alpha = 0.5f),
                 letterSpacing = 3.sp
             )
 
-            Spacer(modifier = Modifier.height(80.dp))
+            Spacer(modifier = Modifier.height(60.dp))
 
             // --- STATUS CARD (Glassmorphism effect) ---
             Box(
                 modifier = Modifier
                     .fillMaxWidth(0.85f)
                     .clip(RoundedCornerShape(24.dp))
-                    .background(Color.White.copy(alpha = 0.05f)) // Translucent background
+                    .background(Color.White.copy(alpha = 0.05f))
                     .border(
                         width = 1.dp,
-                        color = Color.White.copy(alpha = 0.1f), // Subtle border
+                        color = Color.White.copy(alpha = 0.1f),
                         shape = RoundedCornerShape(24.dp)
                     )
                     .padding(32.dp),
@@ -125,48 +158,86 @@ fun CameraScreen(viewModel: CameraViewModel){
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = connectionStatus.name,
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = statusColor,
-                            letterSpacing = 1.sp
-                        )
-                    }
+                    Text(
+                        text = connectionStatus.name,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = statusColor,
+                        letterSpacing = 1.sp
+                    )
                 }
             }
 
-            Spacer(modifier = Modifier.height(80.dp))
+            Spacer(modifier = Modifier.height(40.dp))
+
+            // --- PIPELINE TOGGLES ---
+            Row(
+                modifier = Modifier.fillMaxWidth(0.85f),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                // Video Toggle
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "VIDEO",
+                        color = if (enableVideo) Color.White else Color.Gray,
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Switch(
+                        checked = enableVideo,
+                        onCheckedChange = { enableVideo = it },
+                        enabled = !isStreaming, // Lock switches while actively streaming
+                        colors = SwitchDefaults.colors(checkedTrackColor = Color(0xFF1E88E5))
+                    )
+                }
+
+                // Audio Toggle
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "AUDIO",
+                        color = if (enableAudio) Color.White else Color.Gray,
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Switch(
+                        checked = enableAudio,
+                        onCheckedChange = { enableAudio = it },
+                        enabled = !isStreaming, // Lock switches while actively streaming
+                        colors = SwitchDefaults.colors(checkedTrackColor = Color(0xFF1E88E5))
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(40.dp))
 
             // --- MAIN ACTION BUTTON ---
             Button(
-                onClick = { viewModel.toggleConnection(lifecycleOwner, CAMERA_STREAM_PORT) },
+                onClick = {
+                    viewModel.toggleConnection(
+                        lifecycleOwner = lifecycleOwner,
+                        port = CAMERA_STREAM_PORT,
+                        enableVideo = enableVideo,
+                        enableAudio = enableAudio
+                    )
+                },
+                enabled = canStart || isStreaming, // Disable if both are off, unless we need to stop
                 colors = ButtonDefaults.buttonColors(
                     containerColor = animatedButtonColor,
-                    contentColor = Color.White
+                    contentColor = Color.White,
+                    disabledContainerColor = animatedButtonColor.copy(alpha = 0.5f),
+                    disabledContentColor = Color.White.copy(alpha = 0.5f)
                 ),
                 shape = CircleShape,
                 modifier = Modifier
                     .fillMaxWidth(0.85f)
                     .height(64.dp)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        text = if (connectionStatus == StreamStatus.CONNECTED || connectionStatus == StreamStatus.CONNECTING)
-                            "STOP STREAM"
-                        else "START STREAM",
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleMedium,
-                        letterSpacing = 1.sp
-                    )
-                }
+                Text(
+                    text = if (isStreaming) "STOP STREAM" else "START STREAM",
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium,
+                    letterSpacing = 1.sp
+                )
             }
         }
     }
